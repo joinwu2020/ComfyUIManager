@@ -1,4 +1,4 @@
-# ComfyUI 環境管理工具
+# ComfyUI 環境管理工具 2026.11.13
 
 一套給 Windows + NVIDIA 的 ComfyUI 環境管理腳本，附圖形介面。
 
