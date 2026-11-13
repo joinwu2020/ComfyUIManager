@@ -73,11 +73,29 @@ if E.PIN_CORE:
     if not ok:
         core_err = msg
 else:
-    r = E.run(["git", "fetch", "origin"])
+    # 先把 fetch 範圍縮成只有本體分支。預設會抓上游幾百個開發分支，
+    # 其中任何一個的本地參照對不上就會讓整個 fetch 失敗。
+    narrowed, nmsg = E.narrow_fetch_refspec()
+    if narrowed and nmsg:
+        print(f"[INFO] {nmsg}")
+
+    # --force / --prune-tags：上游重打 tag 時（ComfyUI 發版常見），
+    # 不加會得到 "would clobber existing tag" 而讓 fetch 回傳非 0，
+    # 看起來像斷線，其實連線正常。覆蓋核心抓過 --tags 之後特別容易遇到。
+    FETCH = ["git", "fetch", "origin", "--force", "--tags", "--prune-tags"]
+    r = E.run(FETCH)
+    if r.returncode != 0 and "cannot lock ref" in (r.stderr or "") + (r.stdout or ""):
+        # 殘留的壞參照。清掉之後重試一次，不要讓它擋住整次更新。
+        print("[INFO] 偵測到殘留的遠端參照，清理後重試…")
+        E.run(["git", "remote", "prune", "origin"])
+        r = E.run(FETCH)
     if r.returncode != 0:
-        core_err = "無法連線到 GitHub"
+        # 不要寫死成「無法連線」—— 回傳碼非 0 的原因很多，
+        # 把 git 真正說的話帶出來，否則排查時會被誤導。
+        core_err = f"git fetch 失敗：{E.last_err(r)}"
         core_mode = "未鎖版"
-        print(f"[WARN] {core_err}，跳過")
+        print(f"[WARN] {core_err}")
+        print("[WARN] 跳過本體更新")
     else:
         br = E.default_branch()
         core_mode = f"追蹤 origin/{br}（未鎖版）"
@@ -106,6 +124,12 @@ else:
                           "（內容無意義，但會擋住更新）：")
                     for fn in ph:
                         print(f"        {fn}")
+
+                # 工具自己的安全修補是「未提交的修改」，會擋住更新。
+                # 確認那個檔案只有修補、沒有別的改動，就先撤下；
+                # 本段結束後的 apply_core_patch() 會補回去。
+                if E.unpatch_for_update():
+                    print("[INFO] 暫時撤下 StringFormat 安全修補以便更新（更新後自動補回）")
 
                 # 先點名擋住更新的檔案，不要等 merge 失敗才從錯誤訊息猜
                 dirty = E.dirty_files()
@@ -163,6 +187,10 @@ if core_changed:
 
 
 # ══════════ 2. 本體 requirements ══════════
+# 本體一動過，之前套的安全修補就沒了（git merge / reset 會覆蓋檔案）。
+# 這裡無條件檢查一次，已經在的話只印一行。
+E.apply_core_patch(quiet=True)
+
 E.header("同步本體 requirements")
 if E.PIN_CORE and not core_changed:
     print("[SKIP] 核心鎖版且本次未變動，跳過")
@@ -177,14 +205,19 @@ else:
 # ══════════ 3. 節點依賴 ══════════
 E.header("節點依賴檢查")
 scan = E.scan_nodes()
-hit = 0
+hit = skipped = 0
+snap_nodes = E.snapshot()
 for m in E.enabled_nodes(scan):
     if not m["has_req"]:
         continue
     hit += 1
-    E.install_tracked(rep, ["-r", os.path.join(m["path"], "requirements.txt")],
-                      "節點依賴", m["name"])
-print(f"[INFO] 已檢查 {hit} 個節點的 requirements.txt")
+    res = E.install_node_reqs(rep, m, snap=snap_nodes)
+    if res == "skip":
+        skipped += 1
+    else:
+        snap_nodes = E.snapshot()   # 真的跑過 pip，環境變了，重拍
+print(f"[INFO] 已檢查 {hit} 個節點的 requirements.txt"
+      f"（{skipped} 個已滿足、未呼叫 pip；{hit - skipped} 個有實際安裝）")
 
 
 # ══════════ 4. 自訂節點 git 更新 ══════════
@@ -239,7 +272,8 @@ for m in scan["git"]:
     # 重新檢查：更新後才新增 requirements.txt 的節點，前面那輪掃不到
     req = os.path.join(path, "requirements.txt")
     if os.path.exists(req):
-        E.install_tracked(rep, ["-r", req], "節點更新", name)
+        # 走同一條路：別名、黑名單、已滿足就跳過
+        E.install_node_reqs(rep, {"path": path, "name": name}, stage="節點更新")
 
 
 # ══════════ 5. 自訂 wheel ══════════
@@ -268,6 +302,15 @@ except Exception as ex:
 # ══════════ 7. 摘要 ══════════
 E.header("更新摘要")
 E.print_env(snap_end)
+
+E.section("本體安全修補")
+_st, _p = E.patch_status()
+print("  " + {
+    "patched":    "✓ StringFormat 格式字串限制　已套用",
+    "vulnerable": "✗ StringFormat 未修補 —— 惡意工作流可藉此執行程式碼",
+    "unknown":    "⚠ 認不出要修補的那一行，上游可能已自行修正，請人工確認",
+    "missing":    "⚠ 找不到 comfy_extras/nodes_string.py",
+}[_st])
 
 E.section("ComfyUI 本體")
 print(f"  模式：{core_mode}")

@@ -53,6 +53,10 @@ TORCH_PINS = {                       # 精確版本，不接受更高版
 #        而 pip uninstall tensorflow 不會把 numpy 還原，所以必須另外顧。
 FLOOR_PINS = {
     "numpy": "2.0",
+    # 範例：onnx 1.23 需要 protobuf >= 6.31.1。啟用前先確認沒有節點把它壓在 5.x
+    # （例如舊版 Google Gemini SDK 的 grpcio-status 要求 protobuf<6），
+    # 否則那個節點會「安裝失敗」。
+    # "protobuf": "6.31.1",
 }
 
 # True：每次 pip install 都帶約束檔（env_state/constraints.txt），
@@ -61,30 +65,60 @@ FLOOR_PINS = {
 USE_CONSTRAINTS = True
 
 # install.py 在 torch 之後安裝的額外套件（原 run.bat 的內容）
+# opencv-contrib-python 必須在這裡：BLOCKLIST 擋掉其他 opencv 變體，
+# 而 SHARED_DIR_REPAIR 移除它們之後會把 contrib 補回來。
 EXTRA_PACKAGES = [
-    "opencv-contrib-python", "gguf", "gitpython", "qwen_tts",
-    "rotary-embedding-torch", "soundfile", "imageio-ffmpeg",
-    "triton-windows", "torchlanc", "pydub", "matrix-nio", "diffusers",
-    "kornia<0.8.0", "PyOpenGL_accelerate",
+    "opencv-contrib-python",
+    "triton-windows",
+    "gitpython",          # ComfyUI-Manager 需要
 ]
 
 # 裝了會炸的套件：{套件: 原因}
 # tensorflow：transformers/image_transforms.py 偵測到就會 import 它，
 #             TF 的 wheel 是用 NumPy 1.x 編譯的，配 NumPy 2.x 會讓
 #             所有依賴 transformers 的節點連鎖崩潰。
-# liger-kernel：會 import transformers.models.qwen3_5，那是
-#               FireRedAudio 外掛自帶的私有模組，官方 transformers 沒有。
 BLOCKLIST = {
     "tensorflow":       "transformers 會自動 import，與 NumPy 2.x 不相容",
     "tensorflow-intel": "tensorflow 的相依套件",
     "tensorboard":      "隨 tensorflow 一起進來",
-    "liger-kernel":     "與 FireRedAudio 私有 Qwen3.5 相容層衝突",
+    # 四個 opencv 變體共用同一個 site-packages/cv2/，互相覆蓋。
+    # 統一用 opencv-contrib-python（功能最完整；LayerStyle 的
+    # ximgproc.guidedFilter 需要它），其他三個擋掉。
+    "opencv-python-headless":
+        "會覆蓋 opencv-contrib-python 的 cv2/，使 ximgproc.guidedFilter 消失",
+    "opencv-contrib-python-headless":
+        "headless 變體與 opencv-contrib-python 互相覆蓋",
+    "opencv-python":
+        "opencv-contrib-python 是它的超集，兩者共用 cv2/ 會互相覆蓋",
+    # 範例：不用 Gemini 相關節點時，可擋掉舊版 Google SDK，
+    # 避免 grpcio-status 把 protobuf 壓在 5.x 而與 onnx 衝突。
+    # 擋掉之後，依賴 Gemini API 的節點功能會失效。
+    # "google-generativeai":          "舊版 Gemini SDK；連帶把 protobuf 壓在 5.x",
+    # "google-ai-generativelanguage": "要求 protobuf<6",
+    # "grpcio-status":                "要求 protobuf<6，與 onnx 衝突",
+    # "google-genai":                 "Gemini SDK",
 }
 
 # 不自動 git 更新的節點：{資料夾名: 原因}（依賴仍會檢查）
 EXCLUDE_NODES = {
-    "audio_to_ltx_frames": "自製節點",
-    "save_audio_wav":      "自製節點",
+    # "my_custom_node": "自製節點，不要 git pull",
+}
+
+# 套件在這台機器上換個名字：{requirements 裡的名字: (實際套件, 原因)}
+#
+# pip install -r 是「一行壞、整份死」—— 檔案裡只要有一個在本平台
+# 找不到的套件，同一份 requirements 的其他套件全都不會裝。
+#
+# 這裡列出的名稱，在交給 pip 之前會被換掉：
+#     實際套件已安裝  → 整行剔除（需求已經滿足了）
+#     實際套件沒裝    → 換成實際套件名（版本條件丟掉，跨套件沒有意義）
+#
+# BLOCKLIST 不適合拿來處理這種情形：它的語意是「裝到就移除」，
+# 而 triton-windows 在某些版本的 metadata 名稱就是 triton，
+# 會被自己的守門機制反過來解除安裝。
+REQ_ALIASES = {
+    "triton": ("triton-windows",
+               "PyPI 的 triton 只發布 Linux wheel，Windows 對應套件是 triton-windows"),
 }
 
 # ComfyUI 本體在哪裡。
@@ -93,7 +127,7 @@ EXCLUDE_NODES = {
 #               目錄裡有 main.py + comfy/ 的那一個。可攜碟換到別台電腦、
 #               磁碟代號變了也照樣找得到。
 #   相對路徑     以腳本目錄為基準，例 r"..\ComfyUI"。可攜用這個最穩。
-#   絕對路徑     例 r"C:\Users\User\Documents\comfy\ComfyUI"
+#   絕對路徑     例 r"D:\AI\ComfyUI"
 #
 # 環境變數 COMFY_ROOT 優先於這裡的設定。
 COMFY_ROOT = None
@@ -136,12 +170,12 @@ LAUNCH_ARGS = [
 ]
 
 # 自訂 wheel 的匯入驗證
+# 放進 wheels/ 的自訂 wheel，裝完後用這段程式碼驗證能否 import。
+# {顯示名稱, 一行 Python}；印出的內容會出現在更新摘要。
 WHEEL_CHECKS = [
-    ("comfy_kitchen", "import comfy_kitchen as m; "
-                      "print('sol_attn' if hasattr(m,'sol_attn') else 'no sol_attn')"),
-    ("flash_attn",    "import flash_attn; print(flash_attn.__version__)"),
-    ("sageattention", "from importlib.metadata import version; "
-                      "print(version('sageattention'))"),
+    # ("flash_attn",    "import flash_attn; print(flash_attn.__version__)"),
+    # ("sageattention", "from importlib.metadata import version; "
+    #                   "print(version('sageattention'))"),
 ]
 
 TORCH_CHECK = (
@@ -543,6 +577,155 @@ def constraint_args():
     return ["-c", CONSTRAINTS]
 
 
+def req_lines(path):
+    """
+    讀 requirements.txt 的原始行（保留註解與空行，給改寫用）。
+
+    節點作者的編碼什麼都有 —— UTF-8、帶 BOM 的 UTF-8、UTF-16（Windows
+    記事本「Unicode」存檔的預設）、CP950。一個節點的檔案編碼怪，不該
+    讓整次更新當掉，所以這裡逐一嘗試，最後退回 latin-1（永遠不會失敗，
+    純 ASCII 的套件名仍然讀得對）。
+    """
+    try:
+        raw = open(path, "rb").read()
+    except OSError:
+        return []
+    # UTF-16 先靠 BOM 認出來。不能把它排進一般的嘗試序列——
+    # 沒有 BOM 的 UTF-8 內容只要長度是偶數，用 utf-16 解也「會成功」，
+    # 只是解出一堆亂碼，那比直接失敗更糟。
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            return raw.decode("utf-16").splitlines()
+        except UnicodeError:
+            pass
+    for enc in ("utf-8-sig", "utf-8", "cp950", "latin-1"):
+        try:
+            return raw.decode(enc).splitlines()
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return []
+
+
+def apply_req_aliases(path, snap=None):
+    """
+    依 REQ_ALIASES 改寫節點的 requirements.txt。
+
+    回傳 (要交給 pip 的檔案路徑, [說明字串])。
+    沒有任何一行需要改寫時，直接回傳原路徑，不產生暫存檔。
+    暫存檔寫在 STATE_DIR，不碰節點目錄。
+    """
+    if not REQ_ALIASES or not os.path.exists(path):
+        return path, []
+    snap = snap if snap is not None else snapshot()
+    alias = {norm(k): v for k, v in REQ_ALIASES.items()}
+    bl = {norm(k): v for k, v in BLOCKLIST.items()}
+
+    out, notes, changed = [], [], False
+    for line in req_lines(path):
+        body = line.split("#", 1)[0].strip()
+        if not body:
+            out.append(line)
+            continue
+        # 取套件名：切在第一個版本/環境標記符號之前
+        name = re.split(r"[\s\[<>=!~;]", body, 1)[0].strip()
+
+        # 黑名單先剔除，不要等裝完再移除。
+        # 有些套件「裝了就回不去」——例如四個 opencv 變體共用同一個
+        # site-packages/cv2/，裝下去就把前一個蓋掉，事後解除安裝只會
+        # 留下一個殘缺的 cv2。先攔住才有意義。
+        if norm(name) in bl:
+            changed = True
+            notes.append(f"{name} → 黑名單，未送進 pip（{bl[norm(name)]}）")
+            continue
+
+        hit = alias.get(norm(name))
+        if not hit:
+            out.append(line)
+            continue
+        real, why = hit
+        changed = True
+        if norm(real) in snap:
+            notes.append(f"{name} → 已由 {real} {snap[norm(real)]} 滿足，略過（{why}）")
+        else:
+            notes.append(f"{name} → 改裝 {real}（{why}）")
+            out.append(real)
+
+    if not changed:
+        return path, []
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, "req_alias.txt")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+    except OSError as ex:
+        return path, [f"（改寫失敗，改用原檔：{ex}）"]
+    return tmp, notes
+
+
+def reqs_satisfied(lines, snap):
+    """
+    這幾行 requirements 是不是「全部已經滿足」？
+
+    只要有一行無法判斷（URL、git+、-e、本地路徑、解析失敗），
+    就回傳 False，交給 pip 去處理 —— 寧可多跑一次，不要漏裝。
+    """
+    if Requirement is None:
+        return False
+    for raw in lines:
+        s = raw.split("#")[0].strip()
+        if not s:
+            continue
+        if s.startswith("-") or "://" in s or s.startswith(".") or "@" in s:
+            return False
+        try:
+            r = Requirement(s)
+        except Exception:
+            return False
+        if r.marker is not None:
+            try:
+                if not r.marker.evaluate():
+                    continue
+            except Exception:
+                return False
+        have = snap.get(norm(r.name))
+        if have is None:
+            return False
+        if r.specifier:
+            try:
+                if not r.specifier.contains(have.split("+")[0], prereleases=True):
+                    return False
+            except Exception:
+                return False
+    return True
+
+
+def install_node_reqs(rep, m, stage="節點依賴", snap=None):
+    """
+    裝一個節點的 requirements.txt。
+
+    先套用 REQ_ALIASES / BLOCKLIST 改寫，然後判斷是否「全部已滿足」：
+    已滿足就完全不呼叫 pip。
+
+    這不只是為了快。pip install -r 就算目標套件都已經裝好，
+    仍然會重新檢查「它們的相依」—— 例如 insightface、ultralytics
+    宣告了 opencv-python，而本機刻意不裝它（用 contrib 代替），
+    pip 就會每次都把它補回來，工具再把它移除，無限循環。
+    不呼叫 pip，循環就不會開始。
+
+    回傳 "skip"（已滿足，未呼叫 pip）、True（安裝成功）、False（失敗）
+    """
+    src = os.path.join(m["path"], "requirements.txt")
+    snap = snap if snap is not None else snapshot()
+    use, notes = apply_req_aliases(src, snap=snap)
+    if reqs_satisfied(req_lines(use), snap):
+        for n in notes:
+            log_only(f"[INFO] {m['name']}：{n}")
+        return "skip"
+    for n in notes:
+        print(f"[INFO] {m['name']}：{n}")
+    return install_tracked(rep, ["-r", use], stage, m["name"])
+
+
 def install_tracked(rep, pip_args, stage, source, constrained=True):
     """pip install 並記下這一次讓哪些套件變動，接著立刻守門（歸咎到 source）"""
     before = snapshot()
@@ -621,7 +804,46 @@ def purge_blocklist(rep, stage, culprit=None, snap=None):
         print(f"[ERROR] 移除失敗：{', '.join(left)}")
     else:
         print(f"[INFO] 已移除 {len(hits)} 個套件")
+    repair_shared_dirs(rep, stage, culprit, [p for p, _ in hits], after)
     return True
+
+
+# 共用安裝目錄的套件：移除其中一個之後，另一個也會殘缺。
+#   四個 opencv 變體全部裝進同一個 site-packages/cv2/。
+#   pip 認為它們是不同套件，但檔案是同一批，後裝的覆蓋先裝的；
+#   解除安裝時 pip 只照自己的紀錄刪，留下一個殘缺的 cv2——
+#   典型症狀就是 import cv2 成功、cv2.ximgproc.guidedFilter 卻不見了。
+# 所以移除之後必須把「本機該用的那一個」強制重裝，把檔案補回去。
+SHARED_DIR_REPAIR = {
+    "opencv-python-headless":         "opencv-contrib-python",
+    "opencv-contrib-python-headless": "opencv-contrib-python",
+    "opencv-python":                  "opencv-contrib-python",
+}
+
+
+def repair_shared_dirs(rep, stage, culprit, removed, snap=None):
+    """移除共用目錄的套件之後，把正牌的那一個補回來"""
+    want = {SHARED_DIR_REPAIR[p] for p in removed if p in SHARED_DIR_REPAIR}
+    if not want:
+        return
+    snap = snap if snap is not None else snapshot()
+    for pkg in sorted(want):
+        have = snap.get(norm(pkg))
+        if not have:
+            continue        # 本來就沒裝，不是我們弄壞的，別自作主張裝上
+        print(f"[INFO] {pkg} {have} 與剛移除的套件共用 site-packages，"
+              "強制重裝以補回被覆蓋的檔案…")
+        cmd = PIP + ["install", "--force-reinstall", "--no-deps",
+                     f"{pkg}=={have}", "-q"]
+        if USE_CONSTRAINTS:
+            cmd += constraint_args()
+        r = run(cmd)
+        if r.returncode == 0:
+            print(f"[OK]   {pkg} 已重裝")
+        else:
+            msg = last_err(r)
+            print(f"[ERROR] {pkg} 重裝失敗 — {msg}")
+            rep.pip_fail.append((stage, culprit or pkg, f"{pkg} 重裝失敗：{msg}"))
 
 
 def floor_status(snap):
@@ -829,22 +1051,61 @@ def core_remote():
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def narrow_fetch_refspec():
+    """
+    把 origin 的 fetch 範圍縮成「只有本體分支」。
+
+    預設的 refspec 是 +refs/heads/*:refs/remotes/origin/*，會把上游
+    所有開發者的分支都抓下來（ComfyUI 有好幾百個）。這些分支一個都用不到，
+    卻會帶來兩個實際問題：
+
+      1. fetch 很慢
+      2. 其中任何一個的本地參照只要與上游對不上，整個 fetch 就會失敗：
+             cannot lock ref 'refs/remotes/origin/<某人的分支>':
+             is at X but expected Y
+         於是本體更新被一個與你無關的分支擋住。
+
+    縮窄之後 fetch 只碰 CORE_BRANCH，上述情況不會再發生。
+    tag 仍然照抓（fetch 時帶 --tags），所以 PIN_CORE 鎖 tag 不受影響。
+
+    回傳 (有沒有改, 說明)
+    """
+    want = f"+refs/heads/{CORE_BRANCH}:refs/remotes/origin/{CORE_BRANCH}"
+    r = run(["git", "config", "--get-all", "remote.origin.fetch"])
+    cur = [l.strip() for l in r.stdout.splitlines() if l.strip()]
+    if cur == [want]:
+        return False, ""
+    r = run(["git", "config", "--replace-all", "remote.origin.fetch", want])
+    if r.returncode != 0:
+        return False, f"（refspec 調整失敗：{last_err(r)}）"
+    # 縮窄之後，先前抓下來的其他 origin/* 參照變成孤兒，順手清掉——
+    # 壞掉的那些也會一併消失。prune 失敗不影響主流程。
+    run(["git", "remote", "prune", "origin"])
+    return True, f"fetch 範圍縮為 origin/{CORE_BRANCH}"
+
+
 def sync_core_remote():
-    """把 origin 指到 CORE_REPO；回傳 (有沒有改, 說明)"""
+    """把 origin 指到 CORE_REPO 並縮窄 fetch 範圍；回傳 (有沒有改, 說明)"""
     cur = core_remote()
     if not cur:
         r = run(["git", "remote", "add", "origin", CORE_REPO])
-        return r.returncode == 0, f"新增 origin → {CORE_REPO}"
+        if r.returncode != 0:
+            return False, f"新增 origin 失敗：{last_err(r)}"
+        narrow_fetch_refspec()
+        return True, f"新增 origin → {CORE_REPO}"
 
     def key(u):
         return u.rstrip("/").removesuffix(".git").lower().split("github.com")[-1].strip(":/")
 
+    narrowed, nmsg = narrow_fetch_refspec()
+    tail = f"，{nmsg}" if narrowed else ""
+
     if key(cur) == key(CORE_REPO):
-        return False, f"origin 已正確（{cur}）"
+        return narrowed, f"origin 已正確（{cur}）{tail}"
     r = run(["git", "remote", "set-url", "origin", CORE_REPO])
     if r.returncode != 0:
         return False, f"改 origin 失敗：{last_err(r)}"
-    return True, f"origin 由 {cur} 改為 {CORE_REPO}"
+    return True, f"origin 由 {cur} 改為 {CORE_REPO}{tail}"
 
 
 def clone_core_into_root():
@@ -875,13 +1136,122 @@ def clone_core_into_root():
         shutil.rmtree(tmp, ignore_errors=True)
         return False, f"搬移 .git 失敗：{ex}"
     shutil.rmtree(tmp, ignore_errors=True)
+    # checkout -f 會覆寫同名的未追蹤檔案，這正是「目錄裡已經有一份
+    # 非 git 的本體」時要的行為。萬一 git 仍然拒絕（版本差異、
+    # 檔案被佔用等），退回 reset --hard，它一定會把工作樹寫出來。
     r = run(["git", "checkout", "-f", CORE_BRANCH])
     if r.returncode != 0:
-        return False, f"checkout 失敗：{last_err(r)}"
+        r2 = run(["git", "reset", "--hard", f"origin/{CORE_BRANCH}"])
+        if r2.returncode != 0:
+            return False, (f"checkout 失敗：{last_err(r)}"
+                           f"；改用 reset 也失敗：{last_err(r2)}")
     if not core_present():
         missing = [f for f in CORE_FILES if not os.path.exists(os.path.join(ROOT, f))]
         return False, f"checkout 完成但還是缺：{', '.join(missing)}"
     return True, "已建立 git 工作樹並取出本體"
+
+
+# ══════════════════════ 本體安全修補 ══════════════════════
+#
+# ComfyUI 內建的 StringFormat（Format Text）節點做的是：
+#     f_string.format(**values)        comfy_extras/nodes_string.py
+# 兩個參數都來自工作流，而 str.format 允許 {a.b} 和 {a[k]}，
+# 所以惡意工作流可以從傳進去的物件爬到 ctypes，載入
+# input/ 底下上傳的 DLL —— 任意原生程式碼執行。上游至今未修。
+#
+# 每次更新 / 覆蓋核心之後會自動重新套用。必須自動，因為
+# git reset --hard 會把修補連同本地提交一起丟掉。
+
+PATCH_TARGET = os.path.join("comfy_extras", "nodes_string.py")
+PATCH_OLD = "        return io.NodeOutput(f_string.format(**values))"
+PATCH_NEW = """\
+        # 安全性修補（comfy_env.py 自動套用，上游尚未修正）
+        # str.format 允許 {a.b} 與 {a[k]}，而 f_string 和 values
+        # 都來自工作流，未加限制時可被用來執行任意程式碼。
+        import string as _string
+
+        class _SafeFormatter(_string.Formatter):
+            def get_field(self, field_name, args, kwargs):
+                for _ch in ".[":
+                    if _ch in field_name:
+                        raise ValueError(
+                            "格式字串不允許屬性存取或索引：{%s}"
+                            % field_name)
+                return super().get_field(field_name, args, kwargs)
+
+        return io.NodeOutput(_SafeFormatter().vformat(f_string, (), values))"""
+
+
+def patch_status():
+    """回傳 ('patched' | 'vulnerable' | 'unknown' | 'missing', 路徑)"""
+    p = os.path.join(ROOT, PATCH_TARGET)
+    if not os.path.exists(p):
+        return "missing", p
+    try:
+        src = open(p, encoding="utf-8").read()
+    except OSError:
+        return "unknown", p
+    if "_SafeFormatter" in src:
+        return "patched", p
+    if PATCH_OLD in src:
+        return "vulnerable", p
+    return "unknown", p
+
+
+def unpatch_for_update():
+    """
+    更新本體前，把自己套的安全修補暫時撤掉。
+
+    修補是「未提交的修改」，git 會把它當成本地改動而拒絕更新，
+    結果工具被自己的修補擋住。這裡確認那個檔案「除了修補之外
+    沒有別的差異」才還原 —— 有任何其他改動就不碰，照常回報給使用者。
+    更新完成後 apply_core_patch() 會再補回去。
+
+    回傳 True 表示已撤下。
+    """
+    state, p = patch_status()
+    if state != "patched":
+        return False
+    rel = PATCH_TARGET.replace(os.sep, "/")
+    r = run(["git", "show", f"HEAD:{rel}"])
+    if r.returncode != 0:
+        return False
+    try:
+        cur = open(p, encoding="utf-8").read()
+    except OSError:
+        return False
+    nl = lambda s: s.replace("\r\n", "\n")
+    if nl(cur).replace(nl(PATCH_NEW), nl(PATCH_OLD), 1) != nl(r.stdout):
+        return False        # 還有修補以外的改動，交給使用者決定
+    return run(["git", "checkout", "--", rel]).returncode == 0
+
+
+def apply_core_patch(quiet=False):
+    """套用 StringFormat 的安全修補。回傳 (ok, 說明)"""
+    state, p = patch_status()
+    if state == "patched":
+        if not quiet:
+            print("[OK]   StringFormat 安全修補：已套用")
+        return True, "已套用"
+    if state == "missing":
+        return False, f"找不到 {PATCH_TARGET}"
+    if state == "unknown":
+        msg = (f"{PATCH_TARGET} 認不出要修補的那一行，"
+               "上游可能已經自己修掉，請人工確認")
+        print(f"[WARN] {msg}")
+        return False, msg
+    try:
+        src = open(p, encoding="utf-8").read()
+        new = src.replace(PATCH_OLD, PATCH_NEW, 1)
+        import ast as _ast
+        _ast.parse(new)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(new)
+    except Exception as ex:
+        print(f"[ERROR] 安全修補套用失敗：{ex}")
+        return False, str(ex)
+    print("[INFO] 已重新套用 StringFormat 安全修補")
+    return True, "已重新套用"
 
 
 def ensure_core_tree():
@@ -898,14 +1268,20 @@ def ensure_core_tree():
         return False, "找不到 git，請先安裝：https://git-scm.com/download/win"
     os.makedirs(ROOT, exist_ok=True)
     if not has_git_dir():
-        if core_present():
-            return False, (f"{ROOT} 有本體檔案但沒有 .git，無法用 git 覆蓋。"
-                           "請先把那些檔案刪掉（models / user / custom_nodes "
-                           "留著），再執行一次")
-        return clone_core_into_root()
+        # 這裡以前會在「有本體檔案但沒有 .git」時直接拒絕，要人先手動刪檔。
+        # 那是錯的：clone_core_into_root() 本來就是為了這個情境寫的
+        # （clone 到暫存 → 搬 .git 進來 → 強制取出覆寫），而且這正是
+        # 「重建乾淨環境」最需要它動作的時候。擋住只會讓人卡在這一步。
+        ok, msg = clone_core_into_root()
+        if ok:
+            apply_core_patch()
+        return ok, msg
     changed, msg = sync_core_remote()
     print(f"[{'INFO' if changed else 'OK'}] {msg}")
-    return overwrite_core()
+    ok, msg = overwrite_core()
+    if ok:
+        apply_core_patch()      # reset --hard 會把修補丟掉，馬上補回來
+    return ok, msg
 
 
 def overwrite_core():
@@ -1198,27 +1574,23 @@ def parse_reqs(path):
     if Requirement is None:
         return []
     out = []
-    try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for raw in f:
-                s = raw.split("#")[0].strip()
-                if not s or s.startswith("-"):      # -r / --extra-index-url 等
+    for raw in req_lines(path):                 # 自動處理 UTF-16 / BOM / CP950
+        s = raw.split("#")[0].strip()
+        if not s or s.startswith("-"):          # -r / --extra-index-url 等
+            continue
+        if "://" in s or s.startswith("."):      # 直接指向 URL 或本地路徑
+            continue
+        try:
+            r = Requirement(s)
+        except Exception:
+            continue
+        if r.marker is not None:                # python_version、sys_platform 等
+            try:
+                if not r.marker.evaluate():
                     continue
-                if "://" in s or s.startswith("."):  # 直接指向 URL 或本地路徑
-                    continue
-                try:
-                    r = Requirement(s)
-                except Exception:
-                    continue
-                if r.marker is not None:            # python_version、sys_platform 等
-                    try:
-                        if not r.marker.evaluate():
-                            continue
-                    except Exception:
-                        pass
-                out.append(r)
-    except OSError:
-        pass
+            except Exception:
+                pass
+        out.append(r)
     return out
 
 
@@ -1230,12 +1602,24 @@ def check_requirements(scan, snap):
     """
     unmet, blocked, demands = [], [], {}
     bl = {norm(p) for p in BLOCKLIST}
+    alias = {norm(k): v[0] for k, v in REQ_ALIASES.items()}
+    subst = {norm(k): v for k, v in SHARED_DIR_REPAIR.items()}
     for m in enabled_nodes(scan):
         if not m["has_req"]:
             continue
         for r in parse_reqs(os.path.join(m["path"], "requirements.txt")):
             key = norm(r.name)
             demands.setdefault(key, []).append((m["name"], str(r)))
+
+            # 這台機器用別的套件提供同一個東西 —— 需求其實是滿足的。
+            #   REQ_ALIASES       triton       → triton-windows
+            #   SHARED_DIR_REPAIR *-headless   → opencv-contrib-python
+            # 不處理的話，摘要會把「已經可以用」的需求報成未滿足，
+            # 久了就沒人看那份清單了。
+            other = alias.get(key) or subst.get(key)
+            if other and norm(other) in snap:
+                continue
+
             if key in bl:
                 blocked.append((m["name"], r.name))
                 continue
@@ -1254,6 +1638,27 @@ def check_requirements(scan, snap):
     return unmet, blocked, demands
 
 
+_PIPCHK_MISSING = re.compile(r"requires\s+([A-Za-z0-9._-]+),\s*which is not installed")
+
+
+def pip_check_benign(line, snap):
+    """
+    這一行 pip check 抱怨的是「裝了替代品」而不是真的缺東西嗎？
+
+    例：albumentations 宣告 opencv-python-headless，本機裝的是
+        opencv-contrib-python。兩者提供同一個 cv2，import 完全正常，
+        但 pip 只比對套件名，就會報成缺套件。
+
+    只在「被抱怨的套件在 SHARED_DIR_REPAIR 裡，而且它的替代品確實
+    已安裝」時才算無害 —— 其他情況一律照實報。
+    """
+    m = _PIPCHK_MISSING.search(line)
+    if not m:
+        return False
+    sub = {norm(k): v for k, v in SHARED_DIR_REPAIR.items()}.get(norm(m.group(1)))
+    return bool(sub) and norm(sub) in snap
+
+
 def print_dependency_check(scan, snap):
     """摘要最後一段：真正回答「現在的環境符合各節點的相依宣告嗎」"""
     section("相依性驗證（全部裝完後的實際狀態）")
@@ -1267,13 +1672,26 @@ def print_dependency_check(scan, snap):
         print("  ✓ pip check：已安裝套件之間沒有相依衝突")
     else:
         lines = [l for l in r.stdout.splitlines() if l.strip()]
-        print(f"  ✗ pip check 回報 {len(lines)} 個問題：")
-        for l in lines[:10]:
-            print(f"      {l}")
-        if len(lines) > 10:
-            print(f"      …共 {len(lines)} 行，完整內容見紀錄檔")
-            for l in lines[10:]:
-                log_only(f"      {l}")
+        real, benign = [], []
+        for l in lines:
+            (benign if pip_check_benign(l, snap) else real).append(l)
+        if real:
+            print(f"  ✗ pip check 回報 {len(real)} 個問題：")
+            for l in real[:10]:
+                print(f"      {l}")
+            if len(real) > 10:
+                print(f"      …共 {len(real)} 行，完整內容見紀錄檔")
+                for l in real[10:]:
+                    log_only(f"      {l}")
+        else:
+            print("  ✓ pip check：沒有實際衝突")
+        if benign:
+            # 不是真的缺套件 —— 要的是 cv2，而 cv2 由 contrib 提供。
+            # pip 只比對套件名，看不出這件事，所以降級成說明。
+            print(f"  ℹ {len(benign)} 項 pip check 訊息已確認無害"
+                  "（所需模組由同目錄的替代套件提供）：")
+            for l in benign:
+                print(f"      {l}")
 
     if blocked:
         print(f"  ⚠ {len(blocked)} 個節點要求黑名單套件，該節點的相關功能不會有作用：")
@@ -1352,6 +1770,15 @@ def _status():
         for m in bad_nodes:
             print(f"  ✗ {m['name']} — 沒有 __init__.py，ComfyUI 啟動時會報 "
                   "FileNotFoundError，建議刪除")
+    section("本體安全修補")
+    _st, _p = patch_status()
+    print("  " + {
+        "patched":    "✓ StringFormat 格式字串限制　已套用",
+        "vulnerable": "✗ StringFormat 未修補 —— 跑一次 update.py 會自動補上",
+        "unknown":    "⚠ 認不出要修補的那一行，上游可能已自行修正",
+        "missing":    "⚠ 找不到 comfy_extras/nodes_string.py",
+    }[_st])
+
     section("自訂節點")
     print(f"  可更新（有 git）{len(scan['git'])}　"
           f"無 git {len(scan['nogit'])}　"

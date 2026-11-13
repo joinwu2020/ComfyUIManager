@@ -284,6 +284,8 @@ def inner(args):
             print(f"[INFO] {fn}")
             E.install_tracked(rep, ["-r", p], "本體 requirements", fn)
 
+    E.apply_core_patch(quiet=True)
+
     E.header("4/8 額外套件")
     E.install_tracked(rep, list(E.EXTRA_PACKAGES), "額外套件", "EXTRA_PACKAGES")
 
@@ -298,8 +300,7 @@ def inner(args):
     for m in E.enabled_nodes(scan):
         if m["has_req"]:
             hit += 1
-            E.install_tracked(rep, ["-r", os.path.join(m["path"], "requirements.txt")],
-                              "節點依賴", m["name"])
+            E.install_node_reqs(rep, m)
     print(f"[INFO] 已處理 {hit} 個節點的 requirements.txt")
 
     E.header("6/8 鎖定檔")
